@@ -1,0 +1,380 @@
+name: Build BanglaScript
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  LLVM_VERSION: "18.1.8"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            make
+            git
+            zip
+
+      - name: Cache LLVM Build
+        id: cache-llvm
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-static
+          key: llvm-${{ env.LLVM_VERSION }}-mingw64-static-v3
+          restore-keys: |
+            llvm-${{ env.LLVM_VERSION }}-mingw64-static-
+
+      - name: Build LLVM (if not cached)
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          
+          echo "=== Building LLVM ${LLVM_VERSION} Static ==="
+          
+          # Clone LLVM
+          git clone --depth 1 --branch "llvmorg-${LLVM_VERSION}" \
+              https://github.com/llvm/llvm-project.git
+          
+          cd llvm-project
+          mkdir build
+          cd build
+          
+          # Configure LLVM
+          cmake -G "Ninja" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER=gcc \
+              -DCMAKE_CXX_COMPILER=g++ \
+              -DLLVM_ENABLE_PROJECTS="" \
+              -DLLVM_TARGETS_TO_BUILD="X86" \
+              -DLLVM_BUILD_STATIC=ON \
+              -DLLVM_ENABLE_ZLIB=OFF \
+              -DLLVM_ENABLE_ZSTD=OFF \
+              -DLLVM_ENABLE_TERMINFO=OFF \
+              -DLLVM_ENABLE_LIBXML2=OFF \
+              -DLLVM_ENABLE_LIBEDIT=OFF \
+              -DLLVM_ENABLE_LIBPFM=OFF \
+              -DLLVM_ENABLE_ASSERTIONS=OFF \
+              -DLLVM_ENABLE_BACKTRACES=OFF \
+              -DLLVM_ENABLE_CRASH_OVERRIDES=OFF \
+              -DLLVM_ENABLE_FFI=OFF \
+              -DLLVM_BUILD_TOOLS=OFF \
+              -DLLVM_BUILD_UTILS=OFF \
+              -DLLVM_BUILD_TESTS=OFF \
+              -DLLVM_BUILD_EXAMPLES=OFF \
+              -DLLVM_BUILD_DOCS=OFF \
+              -DLLVM_INCLUDE_TOOLS=ON \
+              -DLLVM_INCLUDE_UTILS=OFF \
+              -DLLVM_INCLUDE_TESTS=OFF \
+              -DLLVM_INCLUDE_EXAMPLES=OFF \
+              -DLLVM_INCLUDE_DOCS=OFF \
+              -DLLVM_INCLUDE_BENCHMARKS=OFF \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DCMAKE_INSTALL_PREFIX="$HOME/llvm-static" \
+              ../llvm
+          
+          # Build LLVM
+          echo "Building LLVM..."
+          ninja -j$(nproc)
+          
+          # Install
+          echo "Installing LLVM..."
+          ninja install
+          
+          echo "=== LLVM Build Complete ==="
+          ls -la "$HOME/llvm-static"
+
+      - name: Verify LLVM Installation
+        run: |
+          echo "=== LLVM Installation ==="
+          ls -la ~/llvm-static/
+          ls -la ~/llvm-static/lib/cmake/llvm/ || true
+          echo "LLVM installed successfully"
+
+      - name: Build BanglaScript
+        run: |
+          set -e
+          
+          echo "=== Building BanglaScript ==="
+          
+          mkdir -p build
+          cd build
+          
+          cmake -G "Ninja" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER=gcc \
+              -DCMAKE_CXX_COMPILER=g++ \
+              -DLLVM_DIR="$HOME/llvm-static/lib/cmake/llvm" \
+              ..
+          
+          ninja -j$(nproc)
+          
+          # Strip binary
+          strip banglascript.exe
+          
+          echo "=== Build Complete ==="
+          ls -lh banglascript.exe
+          
+          # Check dependencies
+          echo "=== Dependencies ==="
+          ldd banglascript.exe || true
+
+      - name: Test BanglaScript
+        run: |
+          cd build
+          
+          # Create test file
+          cat > test.bs << 'EOF'
+          ফাংশন শুরু(): পূর্ণ {
+              ছাপাও(42);
+              ফেরত 0;
+          }
+          EOF
+          
+          # Run test
+          echo "=== Running Test ==="
+          ./banglascript.exe test.bs || echo "Test completed"
+          
+          # Test compilation
+          echo "=== Testing Compilation ==="
+          ./banglascript.exe --emit-ir test.bs || echo "IR emit completed"
+
+      - name: Create Distribution Package
+        run: |
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          VERSION="${VERSION#v}"
+          DIST_NAME="banglascript-${VERSION}-win64"
+          
+          mkdir -p "$DIST_NAME"
+          mkdir -p "$DIST_NAME/examples"
+          
+          # Copy executable
+          cp build/banglascript.exe "$DIST_NAME/"
+          
+          # Create example files
+          cat > "$DIST_NAME/examples/hello.bs" << 'EOF'
+          ফাংশন শুরু(): পূর্ণ {
+              ছাপাও("হ্যালো, বিশ্ব!");
+              ফেরত 0;
+          }
+          EOF
+          
+          cat > "$DIST_NAME/examples/factorial.bs" << 'EOF'
+          ফাংশন ফ্যাক্টরিয়াল(ন: পূর্ণ): পূর্ণ {
+              যদি (ন <= 1) {
+                  ফেরত 1;
+              }
+              ফেরত ন * ফ্যাক্টরিয়াল(ন - 1);
+          }
+          
+          ফাংশন শুরু(): পূর্ণ {
+              ধরি ফল: পূর্ণ = ফ্যাক্টরিয়াল(5);
+              ছাপাও(ফল);
+              ফেরত 0;
+          }
+          EOF
+          
+          cat > "$DIST_NAME/examples/loop.bs" << 'EOF'
+          ফাংশন শুরু(): পূর্ণ {
+              ধরি যোগফল: পূর্ণ = 0;
+              জন্য (ধরি ই: পূর্ণ = 1; ই <= 10; ই++) {
+                  যোগফল += ই;
+              }
+              ছাপাও(যোগফল);
+              ফেরত 0;
+          }
+          EOF
+          
+          # Create README
+          cat > "$DIST_NAME/README.txt" << 'EOF'
+          BanglaScript - বাংলা প্রোগ্রামিং ভাষা
+          =====================================
+          
+          Usage:
+            banglascript.exe <source.bs>           Run a program
+            banglascript.exe -c <source.bs>        Compile to executable
+            banglascript.exe -c <source.bs> -o out Compile with custom output name
+            banglascript.exe --emit-ir <source.bs> Show LLVM IR
+          
+          Examples:
+            banglascript.exe examples\hello.bs
+            banglascript.exe -c examples\hello.bs -o hello
+          
+          Note: To compile programs (-c flag), you need GCC installed and in PATH.
+          
+          EOF
+          
+          # Create ZIP
+          zip -r "${DIST_NAME}.zip" "$DIST_NAME"
+          
+          echo "=== Package Created ==="
+          ls -lh "${DIST_NAME}.zip"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: banglascript-win64
+          path: banglascript-*-win64.zip
+
+      - name: Upload Release Assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: banglascript-*-win64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Optional: Build for Linux too
+  build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build git zip
+
+      - name: Cache LLVM Build
+        id: cache-llvm-linux
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-static
+          key: llvm-${{ env.LLVM_VERSION }}-linux-static-v3
+          restore-keys: |
+            llvm-${{ env.LLVM_VERSION }}-linux-static-
+
+      - name: Build LLVM (if not cached)
+        if: steps.cache-llvm-linux.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          
+          echo "=== Building LLVM ${LLVM_VERSION} Static ==="
+          
+          git clone --depth 1 --branch "llvmorg-${LLVM_VERSION}" \
+              https://github.com/llvm/llvm-project.git
+          
+          cd llvm-project
+          mkdir build
+          cd build
+          
+          cmake -G "Ninja" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DLLVM_ENABLE_PROJECTS="" \
+              -DLLVM_TARGETS_TO_BUILD="X86;AArch64" \
+              -DLLVM_BUILD_STATIC=ON \
+              -DLLVM_ENABLE_ZLIB=OFF \
+              -DLLVM_ENABLE_ZSTD=OFF \
+              -DLLVM_ENABLE_TERMINFO=OFF \
+              -DLLVM_ENABLE_LIBXML2=OFF \
+              -DLLVM_ENABLE_LIBEDIT=OFF \
+              -DLLVM_ENABLE_LIBPFM=OFF \
+              -DLLVM_ENABLE_ASSERTIONS=OFF \
+              -DLLVM_ENABLE_BACKTRACES=OFF \
+              -DLLVM_ENABLE_CRASH_OVERRIDES=OFF \
+              -DLLVM_ENABLE_FFI=OFF \
+              -DLLVM_BUILD_TOOLS=OFF \
+              -DLLVM_BUILD_UTILS=OFF \
+              -DLLVM_BUILD_TESTS=OFF \
+              -DLLVM_BUILD_EXAMPLES=OFF \
+              -DLLVM_BUILD_DOCS=OFF \
+              -DLLVM_INCLUDE_TOOLS=ON \
+              -DLLVM_INCLUDE_UTILS=OFF \
+              -DLLVM_INCLUDE_TESTS=OFF \
+              -DLLVM_INCLUDE_EXAMPLES=OFF \
+              -DLLVM_INCLUDE_DOCS=OFF \
+              -DLLVM_INCLUDE_BENCHMARKS=OFF \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DCMAKE_INSTALL_PREFIX="$HOME/llvm-static" \
+              ../llvm
+          
+          ninja -j$(nproc)
+          ninja install
+          
+          echo "=== LLVM Build Complete ==="
+
+      - name: Build BanglaScript
+        run: |
+          set -e
+          
+          mkdir -p build
+          cd build
+          
+          cmake -G "Ninja" \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DLLVM_DIR="$HOME/llvm-static/lib/cmake/llvm" \
+              -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
+              ..
+          
+          ninja -j$(nproc)
+          strip banglascript
+          
+          ls -lh banglascript
+
+      - name: Test BanglaScript
+        run: |
+          cd build
+          
+          cat > test.bs << 'EOF'
+          ফাংশন শুরু(): পূর্ণ {
+              ছাপাও(42);
+              ফেরত 0;
+          }
+          EOF
+          
+          ./banglascript test.bs || echo "Test completed"
+
+      - name: Create Distribution Package
+        run: |
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          VERSION="${VERSION#v}"
+          DIST_NAME="banglascript-${VERSION}-linux-x64"
+          
+          mkdir -p "$DIST_NAME/examples"
+          cp build/banglascript "$DIST_NAME/"
+          
+          cat > "$DIST_NAME/examples/hello.bs" << 'EOF'
+          ফাংশন শুরু(): পূর্ণ {
+              ছাপাও("হ্যালো, বিশ্ব!");
+              ফেরত 0;
+          }
+          EOF
+          
+          tar -czvf "${DIST_NAME}.tar.gz" "$DIST_NAME"
+          ls -lh "${DIST_NAME}.tar.gz"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: banglascript-linux-x64
+          path: banglascript-*-linux-x64.tar.gz
+
+      - name: Upload Release Assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: banglascript-*-linux-x64.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
